@@ -1,10 +1,15 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { User, UserRole, Announcement } from '../types';
+import { apiFetch } from '../services/apiClient';
 import {
   Menu, X, Search, Bell, Sun, Moon, LogOut, ChevronRight, ChevronLeft, ChevronDown,
   LayoutDashboard, BookOpen, UserCheck, Calendar, ShieldCheck, HelpCircle, Settings, Users,
-  School, GraduationCap, MapPin, BarChart3, FileText, ClipboardList, ShieldAlert, KeyRound,   Clock
+  School, GraduationCap, MapPin, BarChart3, ClipboardList, ShieldAlert, KeyRound, Clock, Database, Home, Award,
+  Fingerprint, Ticket as TicketIcon, ScrollText
 } from 'lucide-react';
+import { LanguageSwitcher } from './LanguageSwitcher';
+import { TicketModal } from './tickets/TicketModal';
+import { LogbookModal } from './LogbookModal';
 
 interface NavigationItem {
   name: string;
@@ -16,6 +21,7 @@ interface NavigationItem {
 
 interface LayoutProps {
   currentUser: User;
+  token: string;
   onRoleSwitch: (role: UserRole) => void;
   activeView: string;
   onSelectView: (view: string) => void;
@@ -23,11 +29,15 @@ interface LayoutProps {
   onMarkNotificationRead: (id: string) => void;
   onClearNotifications: () => void;
   onLogout: () => void;
+  onNavigateHome: () => void;
+  isDark: boolean;
+  onThemeToggle: () => void;
   children: React.ReactNode;
 }
 
 export const Layout: React.FC<LayoutProps> = ({
   currentUser,
+  token,
   onRoleSwitch,
   activeView,
   onSelectView,
@@ -35,6 +45,9 @@ export const Layout: React.FC<LayoutProps> = ({
   onMarkNotificationRead,
   onClearNotifications,
   onLogout,
+  onNavigateHome,
+  isDark,
+  onThemeToggle,
   children
 }) => {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
@@ -48,13 +61,10 @@ export const Layout: React.FC<LayoutProps> = ({
   const [mobileOpen, setMobileOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [showNotifications, setShowNotifications] = useState(false);
-  const [darkMode, setDarkMode] = useState(() => {
-    try {
-      return localStorage.getItem('fln_dark_mode') === 'true';
-    } catch {
-      return false;
-    }
-  });
+  const [showTicketModal, setShowTicketModal] = useState(false);
+  const [showLogbookModal, setShowLogbookModal] = useState(false);
+
+
   const [expandedMenus, setExpandedMenus] = useState<Record<string, boolean>>({});
   const [fontSize, setFontSize] = useState(() => {
     try {
@@ -65,6 +75,18 @@ export const Layout: React.FC<LayoutProps> = ({
     }
   });
   const [pinnedItems, setPinnedItems] = useState<string[]>(['Dashboard']);
+  const [dbStatus, setDbStatus] = useState<{ connected: boolean; mode: string } | null>(null);
+  const [showDbModal, setShowDbModal] = useState(false);
+  const [customUri, setCustomUri] = useState('');
+  const [dbConnecting, setDbConnecting] = useState(false);
+  const [dbConnectMsg, setDbConnectMsg] = useState<{ success: boolean; text: string } | null>(null);
+
+  useEffect(() => {
+    apiFetch('/api/db-status')
+      .then(res => res.json())
+      .then(data => setDbStatus(data))
+      .catch(() => setDbStatus({ connected: false, mode: 'Local File DB (Fallback)' }));
+  }, []);
 
   const adjustFontSize = (delta: number) => {
     setFontSize((prev) => {
@@ -85,17 +107,15 @@ export const Layout: React.FC<LayoutProps> = ({
     document.documentElement.style.fontSize = `${fontSize}%`;
   }, []);
 
-  React.useEffect(() => {
-    const root = document.documentElement;
-    if (darkMode) {
-      root.classList.add('dark');
-    } else {
-      root.classList.remove('dark');
-    }
-    localStorage.setItem('fln_dark_mode', String(darkMode));
-  }, [darkMode]);
-
   const collapsed = false;
+
+  // Mirrors GET /api/logbook authorization: only admin-tier roles may read the
+  // audit trail (teacher/volunteer/school receive 403), so hide the action for them.
+  const canViewLogbook =
+    currentUser.role === UserRole.SUPERADMIN ||
+    currentUser.role === UserRole.ADMIN ||
+    currentUser.role === UserRole.DISTRICT_ADMIN ||
+    currentUser.role === UserRole.BLOCK_ADMIN;
 
   const toggleSidebar = () => {
     setSidebarCollapsed((prev: boolean) => {
@@ -138,12 +158,17 @@ export const Layout: React.FC<LayoutProps> = ({
           icon: GraduationCap,
           subItems: [
             { name: 'Student List', view: 'student_list' },
-            { name: 'Student Profile', view: 'student_profile' },
-            { name: 'Performance', view: 'performance' }
+            { name: 'Student Profile', view: 'student_profile' }
           ]
         });
         list.push({ name: 'Worksheets', view: 'worksheets', icon: ClipboardList });
-        list.push({ name: 'Reports', view: 'reports', icon: FileText });
+        list.push({ name: 'Misconceptions', view: 'misconceptions', icon: Fingerprint });
+        // Pedagogical & Process Feedback — moved out of the TeacherDashboard
+        // body into the LHS sidebar so the ticket form doesn't crowd the
+        // student list / diagnostic cards. The `activePanel === 'tickets'`
+        // route in App.tsx renders the same <TicketSubmission> component
+        // that used to live inline here.
+        list.push({ name: 'Feedback', view: 'tickets', icon: HelpCircle });
         break;
 
       case UserRole.VOLUNTEER:
@@ -168,7 +193,6 @@ export const Layout: React.FC<LayoutProps> = ({
           ]
         });
         list.push({ name: 'Worksheets', view: 'worksheets', icon: ClipboardList });
-        list.push({ name: 'Reports', view: 'reports', icon: FileText });
         break;
 
       case UserRole.SCHOOL:
@@ -176,40 +200,48 @@ export const Layout: React.FC<LayoutProps> = ({
         list.push({ name: 'Students', view: 'students', icon: GraduationCap });
         list.push({ name: 'Performance', view: 'performance', icon: BarChart3 });
         list.push({ name: 'Analytics', view: 'analytics', icon: BarChart3 });
-        list.push({ name: 'Reports', view: 'reports', icon: FileText });
         break;
 
       case UserRole.BLOCK_ADMIN:
         list.push({ name: 'Schools', view: 'schools', icon: School });
         list.push({ name: 'Teachers', view: 'teachers', icon: Users });
         list.push({ name: 'Performance', view: 'performance', icon: BarChart3 });
-        list.push({ name: 'Reports', view: 'reports', icon: FileText });
         list.push({ name: 'Analytics', view: 'analytics', icon: BarChart3 });
+        list.push({ name: 'Question Bank', view: 'question_bank', icon: Database });
+        list.push({ name: 'Aadhaar Reveal', view: 'aadhaar_reveal', icon: ShieldCheck });
+        list.push({ name: 'Security', view: 'security', icon: KeyRound });
         break;
 
       case UserRole.DISTRICT_ADMIN:
         list.push({ name: 'Blocks', view: 'blocks', icon: MapPin });
         list.push({ name: 'Schools', view: 'schools', icon: School });
-        list.push({ name: 'Reports', view: 'reports', icon: FileText });
         list.push({ name: 'Analytics', view: 'analytics', icon: BarChart3 });
+        list.push({ name: 'Question Bank', view: 'question_bank', icon: Database });
+        list.push({ name: 'Aadhaar Reveal', view: 'aadhaar_reveal', icon: ShieldCheck });
+        list.push({ name: 'Security', view: 'security', icon: KeyRound });
         break;
 
       case UserRole.ADMIN:
         list.push({ name: 'Districts', view: 'districts', icon: MapPin });
-        list.push({ name: 'Reports', view: 'reports', icon: FileText });
         list.push({ name: 'Analytics', view: 'analytics', icon: BarChart3 });
+        list.push({ name: 'Question Bank', view: 'question_bank', icon: Database });
+        list.push({ name: 'Aadhaar Reveal', view: 'aadhaar_reveal', icon: ShieldCheck });
+        list.push({ name: 'Security', view: 'security', icon: KeyRound });
+        list.push({ name: 'Certification Reviews', view: 'certification_reviews', icon: Award });
         break;
 
       case UserRole.SUPERADMIN:
         list.push({ name: 'Users', view: 'users', icon: Users });
         list.push({ name: 'Schools', view: 'schools', icon: School });
-        list.push({ name: 'Question Bank', view: 'question_bank', icon: BookOpen });
         list.push({ name: 'Worksheet Templates', view: 'worksheet_templates', icon: ClipboardList });
         list.push({ name: 'Content', view: 'content', icon: BookOpen });
-        list.push({ name: 'Reports', view: 'reports', icon: FileText });
+        list.push({ name: 'Question Bank', view: 'question_bank', icon: Database });
         list.push({ name: 'Analytics', view: 'analytics', icon: BarChart3 });
         list.push({ name: 'System Settings', view: 'system_settings', icon: Settings });
+        list.push({ name: 'Aadhaar Reveal', view: 'aadhaar_reveal', icon: ShieldCheck });
+        list.push({ name: 'Security', view: 'security', icon: KeyRound });
         list.push({ name: 'Audit Logs', view: 'logbook', icon: ShieldCheck });
+        list.push({ name: 'Certification Reviews', view: 'certification_reviews', icon: Award });
         break;
     }
 
@@ -257,45 +289,20 @@ export const Layout: React.FC<LayoutProps> = ({
     <div className="flex min-h-screen flex-col font-sans bg-[linear-gradient(135deg,_#f8fafc_0%,_#eef2ff_100%)] text-slate-900 antialiased dark:bg-[linear-gradient(135deg,_#020617_0%,_#0f172a_100%)] dark:text-slate-100">
 
       {/* Accessibility / Top strip */}
-      <div className="w-full border-b border-slate-200/70 bg-slate-950/95 px-4 py-2.5 text-[10px] font-semibold text-slate-300 backdrop-blur md:px-6 md:text-xs dark:border-slate-800/90">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <span className="rounded-full border border-white/10 bg-white/10 px-2.5 py-1 font-bold text-white">FLN Portal</span>
-            <span className="hidden text-slate-400 sm:inline">Foundational Literacy & Numeracy</span>
-          </div>
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/10 px-2 py-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
-              <button onClick={() => adjustFontSize(-10)} className="rounded px-1.5 py-0.5 text-slate-300 transition hover:bg-white/10 hover:text-white" title="Decrease font size">A-</button>
-              <button onClick={resetFontSize} className="rounded px-1.5 py-0.5 text-slate-300 transition hover:bg-white/10 hover:text-white" title="Reset font size">A</button>
-              <button onClick={() => adjustFontSize(10)} className="rounded px-1.5 py-0.5 text-slate-300 transition hover:bg-white/10 hover:text-white" title="Increase font size">A+</button>
-            </div>
-            <div className="relative">
-              <select
-                defaultValue="en"
-                onChange={(e) => {
-                  if (e.target.value === 'hi') alert("हिन्दी भाषा में बदलें");
-                }}
-                className="cursor-pointer appearance-none rounded-full border border-white/10 bg-white/10 px-3 py-1.5 pr-8 text-[10px] font-semibold text-slate-200 outline-none transition hover:border-white/20 hover:bg-white/15 md:text-xs"
-              >
-                <option value="en">English</option>
-                <option value="hi">हिन्दी</option>
-              </select>
-              <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
-            </div>
+      <div className="w-full bg-[#111827] text-gray-300 text-[10px] md:text-xs font-semibold px-6 py-2 flex justify-between items-center border-b border-gray-800 shrink-0">
+        <div className="flex items-center gap-3">
+          <span className="font-bold text-white dark:text-gray-200">FLN Portal</span>
+          <span className="text-gray-500 dark:text-gray-600">|</span>
+          <span className="text-gray-300 dark:text-gray-400 hidden sm:inline font-mono">Foundational Literacy & Numeracy</span>
+        </div>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-1 text-[10px] md:text-xs font-bold">
+            <button onClick={() => adjustFontSize(-10)} className="hover:text-white transition px-1.5 py-0.5 rounded border border-gray-700 hover:border-gray-500" title="Decrease font size">A-</button>
+            <button onClick={resetFontSize} className="hover:text-white transition px-1.5 py-0.5 rounded border border-gray-700 hover:border-gray-500" title="Reset font size">A</button>
+            <button onClick={() => adjustFontSize(10)} className="hover:text-white transition px-1.5 py-0.5 rounded border border-gray-700 hover:border-gray-500" title="Increase font size">A+</button>
           </div>
           <span className="text-gray-700 dark:text-gray-500">|</span>
-          <select
-            defaultValue="en"
-            onChange={(e) => {
-              if (e.target.value === 'hi') alert("हिन्दी भाषा में बदलें");
-              if (e.target.value === 'pa') alert("ਪੰਜਾਬੀ ਭਾਸ਼ਾ ਵਿੱਚ ਬਦਲੋ");
-            }}
-            className="bg-gray-800 text-gray-300 text-[10px] md:text-xs font-bold border border-gray-700 rounded px-2 py-1 outline-none hover:border-gray-500 cursor-pointer"
-          >
-            <option value="en">English</option>
-            <option value="pa">ਪੰਜਾਬੀ</option>
-            <option value="hi">हिन्दी</option>
-          </select>
+          <LanguageSwitcher variant="dark" />
         </div>
       </div>
 
@@ -357,18 +364,35 @@ export const Layout: React.FC<LayoutProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-2 sm:gap-3">
-          <div className="hidden shrink-0 items-center gap-2 rounded-full border border-emerald-200/80 bg-emerald-50/80 px-3 py-1.5 text-xs font-mono font-bold text-emerald-700 shadow-[0_8px_18px_-14px_rgba(16,185,129,0.7)] md:flex dark:border-emerald-800/60 dark:bg-emerald-950/40 dark:text-emerald-400">
-            <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="text-[10px] uppercase tracking-wider">MongoDB Connected</span>
-          </div>
+        {/* Topbar Right Section */}
+        <div className="flex items-center gap-4">
+          {/* Language Switcher — dashboard chrome labels remain English for now;
+              the landing page hero/stats/vision copy is already routed through t(). */}
+          <LanguageSwitcher />
 
+          {/* Dynamic Database Storage Status */}
           <button
-            onClick={() => setDarkMode(!darkMode)}
-            className="ui-button rounded-2xl border border-slate-200/80 bg-white/90 p-2.5 text-slate-500 shadow-[0_10px_24px_-18px_rgba(15,23,42,0.45)] transition duration-200 hover:-translate-y-0.5 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800/90 dark:text-slate-400 dark:hover:bg-slate-700"
-            title="Toggle Theme"
+            onClick={() => setShowDbModal(true)}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-mono font-bold shrink-0 cursor-pointer transition ${
+              dbStatus?.connected
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:border-emerald-800 dark:text-emerald-300'
+                : 'border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 dark:bg-amber-950/40 dark:border-amber-800 dark:text-amber-300'
+            }`}
+            title="Click to view Database status and options"
           >
-            {darkMode ? <Sun className="h-4.5 w-4.5" /> : <Moon className="h-4.5 w-4.5" />}
+            <span className={`h-2.5 w-2.5 rounded-full shrink-0 ${dbStatus?.connected ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
+            <span className="text-[10px] uppercase tracking-wider">
+              {dbStatus?.connected ? 'MongoDB Atlas Connected' : 'Local DB (Offline)'}
+            </span>
+          </button>
+
+          {/* Theme Toggle */}
+          <button
+            onClick={onThemeToggle}
+            className="rounded-lg p-2 text-slate-505 hover:bg-slate-100 hover:text-slate-800 transition-all duration-200 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
+            title={isDark ? "Switch to Light Mode" : "Switch to Dark Mode"}
+          >
+            {isDark ? <Sun className="h-4.5 w-4.5 text-amber-500" /> : <Moon className="h-4.5 w-4.5" />}
           </button>
 
           <div className="relative">
@@ -417,8 +441,31 @@ export const Layout: React.FC<LayoutProps> = ({
             )}
           </div>
 
-          <div className="flex items-center gap-2 rounded-full border border-slate-200/80 bg-slate-50/80 px-2 py-1.5 shadow-[0_10px_26px_-18px_rgba(15,23,42,0.4)] transition hover:border-slate-300 hover:bg-white dark:border-slate-700/80 dark:bg-slate-800/70 dark:hover:bg-slate-800">
-            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-indigo-100 to-violet-50 text-sm font-semibold text-indigo-700 shadow-sm ring-2 ring-white dark:from-indigo-950/70 dark:to-violet-950/60 dark:text-indigo-300 dark:ring-slate-800">
+          {/* Support Tickets — opens the existing ticket list/create flow */}
+          <button
+            onClick={() => setShowTicketModal(true)}
+            className="rounded-lg p-2 text-slate-505 hover:bg-slate-100 hover:text-indigo-600 transition dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-indigo-400"
+            title="Support Tickets"
+            aria-label="Open support tickets"
+          >
+            <TicketIcon className="h-4.5 w-4.5" />
+          </button>
+
+          {/* Activity Logbook — admin-tier only, matching /api/logbook authorization */}
+          {canViewLogbook && (
+            <button
+              onClick={() => setShowLogbookModal(true)}
+              className="rounded-lg p-2 text-slate-505 hover:bg-slate-100 hover:text-indigo-600 transition dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-indigo-400"
+              title="Activity Logbook"
+              aria-label="Open activity logbook"
+            >
+              <ScrollText className="h-4.5 w-4.5" />
+            </button>
+          )}
+
+          {/* User Profile Info */}
+          <div className="flex items-center gap-2 border-l border-slate-200 pl-4 dark:border-slate-700">
+            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-indigo-100 text-sm font-semibold text-indigo-700 dark:bg-indigo-900/50 dark:text-indigo-300">
               {currentUser.name.charAt(0)}
             </div>
             <div className="hidden flex-col sm:flex">
@@ -427,6 +474,13 @@ export const Layout: React.FC<LayoutProps> = ({
                 {currentUser.role.replace('_', ' ')}
               </span>
             </div>
+            <button
+              onClick={onNavigateHome}
+              className="rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-indigo-500 transition dark:text-slate-500 dark:hover:bg-slate-800 dark:hover:text-indigo-400"
+              title="Home"
+            >
+              <Home className="h-4.5 w-4.5" />
+            </button>
             <button
               onClick={onLogout}
               className="ui-button rounded-2xl border border-slate-200/80 bg-white/90 p-2 text-slate-400 shadow-[0_10px_24px_-18px_rgba(15,23,42,0.45)] transition duration-200 hover:-translate-y-0.5 hover:bg-slate-100 hover:text-red-500 dark:border-slate-700 dark:bg-slate-800/90 dark:text-slate-500 dark:hover:bg-slate-700 dark:hover:text-red-400"
@@ -663,20 +717,17 @@ export const Layout: React.FC<LayoutProps> = ({
           </div>
         )}
 
-        <main className="flex-1 overflow-y-auto bg-[radial-gradient(circle_at_top_left,_rgba(99,102,241,0.08),_transparent_30%),linear-gradient(180deg,_#f8fafc_0%,_#f1f5f9_100%)] p-4 sm:p-6 md:p-8 dark:bg-[radial-gradient(circle_at_top_left,_rgba(129,140,248,0.12),_transparent_28%),linear-gradient(180deg,_#020617_0%,_#0f172a_100%)]">
-          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-full border border-slate-200/80 bg-white/85 px-4 py-2.5 shadow-[0_12px_30px_-20px_rgba(15,23,42,0.35)] backdrop-blur xl:px-5 dark:border-slate-700/70 dark:bg-slate-900/80">
-            <div className="flex items-center gap-1.5 text-[10px] font-mono font-bold uppercase tracking-[0.24em] text-slate-400 dark:text-slate-500">
-              {breadcrumbs.map((bc, idx) => (
-                <React.Fragment key={idx}>
-                  {idx > 0 && <ChevronRight className="h-3 w-3 text-slate-300 dark:text-slate-600" />}
-                  <span className={idx === breadcrumbs.length - 1 ? 'font-extrabold text-slate-600 dark:text-slate-300' : ''}>{bc}</span>
-                </React.Fragment>
-              ))}
-            </div>
-            <div className="flex items-center gap-2 rounded-full border border-emerald-200/80 bg-emerald-50/80 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.24em] text-emerald-700 shadow-[0_10px_22px_-16px_rgba(16,185,129,0.7)] dark:border-emerald-800/60 dark:bg-emerald-950/40 dark:text-emerald-400">
-              <ShieldCheck className="h-3.5 w-3.5" />
-              Live workspace
-            </div>
+        {/* Central main display viewport */}
+        <main className="flex-1 p-6 md:p-8 overflow-y-auto bg-slate-50 dark:bg-slate-950">
+
+          {/* Breadcrumbs */}
+          <div className="flex items-center gap-1.5 text-[10px] font-mono text-slate-400 uppercase font-bold tracking-wider mb-2 select-none dark:text-slate-500">
+            {breadcrumbs.map((bc, idx) => (
+              <React.Fragment key={idx}>
+                {idx > 0 && <ChevronRight className="h-3 w-3 text-slate-300 dark:text-slate-600" />}
+                <span className={idx === breadcrumbs.length - 1 ? 'text-slate-600 font-extrabold dark:text-slate-300' : ''}>{bc}</span>
+              </React.Fragment>
+            ))}
           </div>
 
           <div className="space-y-6 rounded-[30px] border border-slate-200/80 bg-white/80 p-4 shadow-[0_24px_60px_-34px_rgba(15,23,42,0.42)] backdrop-blur-xl sm:p-6 dark:border-slate-700/70 dark:bg-slate-900/75">
@@ -689,6 +740,118 @@ export const Layout: React.FC<LayoutProps> = ({
           </footer>
         </main>
       </div>
+
+      {/* Database Connection & Status Modal */}
+      {showDbModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
+          <div className="w-full max-w-xl rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-6 shadow-2xl space-y-5 animate-in fade-in zoom-in duration-150">
+            
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-4">
+              <div className="flex items-center gap-3">
+                <div className={`p-2 rounded-lg ${dbStatus?.connected ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300'}`}>
+                  <Database className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-900 dark:text-white text-base">Database Connection Manager</h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">Manage MongoDB Atlas & Local Database Storage</p>
+                </div>
+              </div>
+              <button onClick={() => setShowDbModal(false)} className="p-1 rounded bg-slate-100 dark:bg-slate-800 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {/* Current Status Banner */}
+            <div className={`p-4 rounded-lg border text-xs space-y-1 ${dbStatus?.connected ? 'bg-emerald-50 border-emerald-200 text-emerald-800 dark:bg-emerald-950/30 dark:border-emerald-800 dark:text-emerald-300' : 'bg-amber-50 border-amber-200 text-amber-800 dark:bg-amber-950/30 dark:border-amber-800 dark:text-amber-300'}`}>
+              <div className="flex items-center justify-between font-bold">
+                <span>Active Mode: {dbStatus?.mode || 'Local File DB'}</span>
+                <span className="px-2 py-0.5 rounded text-[10px] uppercase font-mono font-bold border border-current">{dbStatus?.connected ? 'Connected' : 'Offline Mode'}</span>
+              </div>
+              <p className="text-[11px] opacity-90">
+                {dbStatus?.connected 
+                  ? 'Your app is directly reading and writing live data from your MongoDB Atlas cloud database.'
+                  : 'Remote MongoDB Atlas timed out or IP was not whitelisted. System is automatically running on local file DB fallback (data/db.json).'}
+              </p>
+            </div>
+
+            {/* Live Connect Input Form */}
+            <form onSubmit={async (e) => {
+              e.preventDefault();
+              if (!customUri.trim()) return;
+              setDbConnecting(true);
+              setDbConnectMsg(null);
+              try {
+                const res = await apiFetch('/api/db-config', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ mongodbUri: customUri.trim() })
+                });
+                const data = await res.json();
+                if (data.success) {
+                  setDbConnectMsg({ success: true, text: 'Successfully connected to MongoDB Atlas!' });
+                  setDbStatus({ connected: true, mode: 'MongoDB Atlas' });
+                } else {
+                  setDbConnectMsg({ success: false, text: data.error || 'Connection failed. Verify IP Whitelist in Atlas.' });
+                }
+              } catch (_) {
+                setDbConnectMsg({ success: false, text: 'Failed to reach server endpoint.' });
+              } finally {
+                setDbConnecting(false);
+              }
+            }} className="space-y-3 pt-2">
+              <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
+                Connect New MongoDB Atlas Connection String:
+              </label>
+              <input
+                type="text"
+                value={customUri}
+                onChange={(e) => setCustomUri(e.target.value)}
+                placeholder="mongodb+srv://user:password@cluster.mongodb.net/fln"
+                className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+              />
+              
+              {dbConnectMsg && (
+                <div className={`p-2.5 rounded text-xs border font-medium ${dbConnectMsg.success ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-rose-50 border-rose-200 text-rose-800'}`}>
+                  {dbConnectMsg.text}
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowDbModal(false)}
+                  className="px-4 py-2 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  Close
+                </button>
+                <button
+                  type="submit"
+                  disabled={dbConnecting || !customUri.trim()}
+                  className="px-4 py-2 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 transition"
+                >
+                  {dbConnecting ? 'Connecting...' : 'Connect to MongoDB'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Support Ticket & Activity Logbook Modals */}
+      <TicketModal
+        isOpen={showTicketModal}
+        onClose={() => setShowTicketModal(false)}
+        token={token}
+        userRole={currentUser.role}
+      />
+      {canViewLogbook && (
+        <LogbookModal
+          isOpen={showLogbookModal}
+          onClose={() => setShowLogbookModal(false)}
+          token={token}
+          user={currentUser}
+        />
+      )}
     </div>
   );
 };
